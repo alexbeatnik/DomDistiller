@@ -3,7 +3,7 @@
 > **A DOM compiler for LLM agents.** Stop letting Copilot, Claude, and your QA agents read the raw DOM. They shouldn't. They were never supposed to.
 
 [![npm version](https://badge.fury.io/js/dom-distiller.svg)](https://www.npmjs.com/package/dom-distiller)
-[![Tests](https://img.shields.io/badge/tests-1070%2F1070%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1086%2F1086%20passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)]()
 
 ---
@@ -203,6 +203,11 @@ function astToMarkdown(
 ): string;
 ```
 
+Supported columns include the standard fields (`role`, `text`, `locator`, `tag`, `editable`, `interactable`, `disabled`, `checked`) plus v2 Semantic AST fields:
+- `confidence` — shows `locatorStrategy.confidence`
+- `semanticContext` — shows the detected form/dialog group name
+- `relations` — shows a comma-separated list of relation types
+
 ### `getInteractable(controlMap)` / `getEditable(controlMap)`
 
 Filter to only controls the agent can actually click / type into.
@@ -220,6 +225,18 @@ data-testid=login-btn  →  page.locator('[data-testid="login-btn"]')
 id=email               →  page.locator('#email')
 aria-label=Search      →  page.locator('[aria-label="Search"]')
 xpath=/html/body/...   →  page.locator('xpath=/html/body/...')
+```
+
+### `controlToPlaywrightSelfHealingLocator(node)`
+
+Build a resilient Playwright locator using `.or()` chains across the node's ranked fallback locators. Skips low-confidence `xpath=` fallbacks.
+
+```typescript
+// LocatorStrategy: primary="name=email", fallbacks=["aria-label=Work Email"]
+page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
+
+// LocatorStrategy: primary="data-testid=save-btn", fallbacks=[]
+page.locator('[data-testid="save-btn"]')
 ```
 
 ### `describePage(controlMap)`
@@ -249,6 +266,11 @@ interface DistilledNode {
   text: string;               // cleaned visible text / accessible name
   locator: string;            // best stable locator (compiler-ranked)
   locatorFallback: string[];  // ranked fallbacks
+  locatorStrategy: {          // structured stability engine output
+    primary: string;
+    fallbacks: string[];
+    confidence: 'high' | 'medium' | 'low';
+  };
   interactable: boolean;
   visible: boolean;
   editable: boolean;
@@ -257,6 +279,16 @@ interface DistilledNode {
   attributes: Record<string, string>;
   rect: { top; left; bottom; right; width; height };
   children: DistilledNode[];
+  relations: NodeRelation[];  // contextual awareness graph
+  semanticContext?: string;   // e.g. "Login Form", "Payment Dialog"
+  groupId?: string;           // stable group identifier
+}
+
+interface NodeRelation {
+  type: 'label-for' | 'aria-controls' | 'aria-describedby' | 'aria-labelledby' | 'spatial-near';
+  targetLocator: string;
+  targetText?: string;
+  description: string;        // human-readable, e.g. "Labels Email"
 }
 ```
 
@@ -273,12 +305,12 @@ src/
   types.ts            # Shared TS interfaces (browser-safe)
   core/               # ⚠ BROWSER-ONLY — runs inside the page
     visibility.ts     # display/opacity/aria-hidden/occlusion
-    extractor.ts      # interactivity + locator ranking
+    extractor.ts      # interactivity + locator ranking + relations + semantic grouping
     flattener.ts      # wrapper compression
   llm/                # ⚠ NODE-ONLY — runs on the compiled AST
     markdown.ts       # AST → Markdown table
     query.ts          # fuzzy search + filters
-    playwright.ts     # AST → page.locator() source
+    playwright.ts     # AST → page.locator() source + self-healing chains
   injected.ts         # AUTO-GENERATED bundle (do not edit)
   generated/script.ts # AUTO-GENERATED string export (do not edit)
   index.ts            # Public Node entry point
@@ -293,6 +325,64 @@ scripts/
 - **`src/llm/*` runs in Node.** It consumes a `ControlMap` that has already been compiled. It never touches the DOM.
 
 Mixing them is the #1 way to break this library. See [CLAUDE.md](CLAUDE.md) for the full architectural contract.
+
+### v2 Extraction Engine — Semantic AST
+
+The browser injection layer (`src/core/`) now performs four additional passes after the initial TreeWalker extraction. All of them run in the browser and emit a **Semantic AST** — a control map where every node carries context, not just coordinates.
+
+#### 1. Semantic Grouping (Form Detection)
+
+During extraction, every node queries its DOM ancestry for `<form>`, `<fieldset>`, `<dialog>`, or `[role="dialog"]` containers. When found, the node is tagged with:
+
+- `groupId`: a stable slug derived from the container's `id`, `name`, `aria-label`, or heading text (e.g. `form-login`, `dialog-delete-account`).
+- `semanticContext`: the human-readable name of that container (e.g. `"Login Form"`, `"Delete Account"`).
+
+This means Copilot no longer sees a flat list of 12 inputs and 3 buttons. It sees a **structured control map** with clear boundaries: `"These 3 inputs + 1 button belong to the Login Form. Those 2 inputs + 1 button belong to the 2FA Verification dialog."`
+
+Implementation: `detectSemanticContext()` in `src/core/extractor.ts` uses `element.closest()` — O(depth) per node, effectively free inside the TreeWalker pass.
+
+#### 2. Relations Graph (Contextual Awareness)
+
+After the tree is flattened, a second pass resolves ID-based relationships that were captured as raw attributes during extraction:
+
+- **`label-for`**: a `<label for="email">` gets a relation pointing to the input with `id="email"`.
+- **`aria-controls`**: a tab button gets a relation to its tabpanel.
+- **`aria-describedby`**: an input gets a relation to its help text.
+- **`aria-labelledby`**: an input gets a relation to its label element(s).
+- **`spatial-near`**: for every interactable node, up to 2 nearest neighbors within the same `groupId` are linked using their bounding-box distance.
+
+Each relation carries `targetLocator`, `targetText`, and a `description` string that the LLM can read directly.
+
+Implementation: `resolveRelations()` and `computeSpatialProximity()` in `src/core/extractor.ts`. This is a post-pass over the already-pruned AST (typically ~50 nodes), so O(n²) spatial checks are trivial.
+
+#### 3. Multi-Locator Strategy (Stability Engine)
+
+The extractor no longer returns a single string locator. It returns a `LocatorStrategy` object:
+
+```typescript
+{
+  primary:    "data-testid=login-btn",
+  fallbacks:  ["id=submit", "text=Log In"],
+  confidence: "high"   // "high" | "medium" | "low"
+}
+```
+
+Confidence is assigned by the extractor:
+- **high** — `data-testid`, `data-test`, `data-qa`
+- **medium** — stable `id`, `name`, `aria-label`, `placeholder`, `href`
+- **low** — `xpath` fallback
+
+The Node layer exposes `controlToPlaywrightSelfHealingLocator(node)`, which turns a `LocatorStrategy` into a resilient Playwright expression:
+
+```typescript
+page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
+```
+
+This lets Copilot emit **self-healing selectors** that survive minor DOM churn without hallucinating new ones.
+
+#### 4. Incremental Distillation (MutationObserver) — Architecture Note
+
+The current release runs a full distillation on every call. The architecture is designed to support `observeDOMChanges()` in a future release: a `MutationObserver` inside the browser page would maintain a patched AST in memory, providing 0-latency updates when Copilot needs to check state after a click. This is **not yet implemented** — the current workflow is still `distillPage(page)` per step — but the AST shape (`relations`, `groupId`, `locatorStrategy`) is designed to make incremental patching straightforward.
 
 ### Build pipeline (`npm run build`)
 
@@ -325,38 +415,81 @@ import {
   getInteractable,
   findControls,
   controlToPlaywrightLocator,
+  controlToPlaywrightSelfHealingLocator,
   describePage,
 } from 'dom-distiller';
 
 const browser = await chromium.launch();
 const page = await browser.newPage();
-await page.goto('https://my-app.com/settings');
+await page.goto('https://my-app.com/login');
 
-// 1. Compile the page
+// 1. Compile the page into a Semantic AST
 const controlMap = await distillPage(page);
 const controls = getInteractable(controlMap);
 
 // 2. Build LLM context (Markdown table + summary)
-const markdown = astToMarkdown(controls, { maxRows: 30 });
+//    Include semantic context so the LLM understands form boundaries
+const markdown = astToMarkdown(controls, {
+  columns: ['role', 'text', 'locator', 'confidence', 'semanticContext'],
+  maxRows: 30,
+});
 const description = describePage(controls);
 
 // 3. Resolve a specific control without an LLM round-trip
-const [saveBtn] = findControls(controls, { text: 'save', role: 'button' });
-console.log(controlToPlaywrightLocator(saveBtn));
-// → page.locator('[data-testid="save-settings"]')
+const [signIn] = findControls(controls, { text: 'sign in', role: 'button' });
+console.log(controlToPlaywrightLocator(signIn));
+// → page.locator('[data-testid="login-btn"]')
 
-// 4. Use in a Copilot / Claude prompt
+// 4. Emit a self-healing locator for resilient tests
+const [emailInput] = findControls(controls, { text: 'email', role: 'textbox' });
+console.log(controlToPlaywrightSelfHealingLocator(emailInput));
+// → page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
+
+// 5. Use in a Copilot / Claude prompt with Semantic AST context
 const prompt = `
-Page: Settings
+Page: Login
 ${description}
 
 Available controls:
 ${markdown}
 
-Task: change language to "Ukrainian" and save.
+IMPORTANT SEMANTIC NOTES:
+- The "Login Form" group contains the email input, password input, and Sign In button.
+- The email input has a label-for relation to the "Email" label.
+- The Sign In button has confidence "high" (data-testid). Use it as the primary locator.
+- The password input has confidence "medium" (id). Its fallback is aria-label.
+
+Task: log in as user@example.com with password "secret123".
 Write Playwright TypeScript. Use ONLY the locators above.
+Prefer high-confidence locators. Use .or() chains only when confidence is medium or low.
 `;
 ```
+
+### How the Semantic AST helps Copilot write better code
+
+**Before (flat AST):**
+```markdown
+| role    | text     | locator               | tag    |
+|---------|----------|-----------------------|--------|
+| textbox | Email    | id=email              | input  |
+| textbox | Password | id=password           | input  |
+| button  | Sign In  | data-testid=login-btn | button |
+| button  | Sign In  | data-testid=oauth-btn | button |
+```
+
+Copilot sees two "Sign In" buttons and has to guess which one to click.
+
+**After (Semantic AST):**
+```markdown
+| role    | text     | locator               | confidence | semanticContext |
+|---------|----------|-----------------------|------------|-----------------|
+| textbox | Email    | id=email              | medium     | Login Form      |
+| textbox | Password | id=password           | medium     | Login Form      |
+| button  | Sign In  | data-testid=login-btn | high       | Login Form      |
+| button  | Sign In  | data-testid=oauth-btn | high       | OAuth Dialog    |
+```
+
+Now Copilot knows: `"Click the Sign In button inside the Login Form — not the one in the OAuth Dialog."` No guessing. No hallucinated selectors.
 
 ---
 
@@ -366,7 +499,7 @@ Write Playwright TypeScript. Use ONLY the locators above.
 npm install
 npx playwright install chromium    # one-time
 npm run build
-npm test                           # 21 suites, ~1070 traps, real headless Chromium
+npm test                           # 22 suites, ~1086 traps, real headless Chromium
 ```
 
 `src/injected.ts`, `dist/injected.js`, and `src/generated/script.ts` are **auto-generated**. Do not hand-edit.

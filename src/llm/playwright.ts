@@ -75,6 +75,47 @@ export function controlToPlaywrightLocator(node: DistilledNode): string {
 }
 
 /**
+ * Build a self-healing Playwright locator using `.or()` chains.
+ *
+ * Uses the structured locatorStrategy (primary + ranked fallbacks) so that
+ * Copilot can emit resilient selectors that survive minor DOM churn.
+ *
+ * Example:
+ *   data-testid=login-btn (high) → page.locator('[data-testid="login-btn"]')
+ *   id=email (medium)            → page.locator('#email')
+ *   xpath=... (low)              → skipped from self-healing chain
+ *
+ * For a node with primary "name=email" and fallback "aria-label=Work Email":
+ *   page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
+ */
+export function controlToPlaywrightSelfHealingLocator(node: DistilledNode): string {
+  const { locatorStrategy } = node;
+  const locators = [locatorStrategy.primary, ...locatorStrategy.fallbacks]
+    .filter((l) => l && !l.startsWith('xpath='))
+    .slice(0, 3);
+
+  if (locators.length <= 1) {
+    return controlToPlaywrightLocator(node);
+  }
+
+  // Build first locator
+  let result = controlToPlaywrightLocator({ ...node, locator: locators[0] });
+
+  for (let i = 1; i < locators.length; i++) {
+    const inner = controlToPlaywrightLocator({ ...node, locator: locators[i] });
+    // Extract selector string from page.locator('...')
+    const selectorMatch = inner.match(/^page\.locator\((['"`])(.+)\1\)$/);
+    if (selectorMatch) {
+      result += `.or(page.locator(${selectorMatch[1]}${selectorMatch[2]}${selectorMatch[1]}))`;
+    } else {
+      result += `.or(${inner})`;
+    }
+  }
+
+  return result;
+}
+
+/**
  * Generate a human-readable description of the page controls.
  */
 export function describePage(ast: DistilledNode[]): string {

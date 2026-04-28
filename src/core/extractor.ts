@@ -1,4 +1,4 @@
-import type { DistilledNode, DistillOptions } from '../types';
+import type { DistilledNode, DistillOptions, LocatorStrategy, NodeRelation } from '../types';
 import { getRect, isVisible } from './visibility';
 
 const INTERACTIVE_TAGS = new Set([
@@ -15,7 +15,8 @@ const INTERACTIVE_ROLES = new Set([
 
 const STABLE_ATTRS = [
   'data-testid', 'data-test', 'data-qa', 'data-id',
-  'id', 'name', 'aria-label', 'placeholder', 'title', 'alt', 'href', 'type', 'value',
+  'id', 'name', 'aria-label', 'aria-labelledby', 'aria-describedby', 'aria-controls',
+  'placeholder', 'title', 'alt', 'href', 'type', 'value', 'for',
 ];
 
 export function isInteractive(el: Element): boolean {
@@ -122,22 +123,22 @@ function getStableAttributes(el: Element): Record<string, string> {
   return attrs;
 }
 
-function buildLocator(el: Element, attrs: Record<string, string>): { primary: string; fallbacks: string[] } {
+function buildLocator(el: Element, attrs: Record<string, string>): LocatorStrategy {
   const tag = el.tagName.toLowerCase();
   const fallbacks: string[] = [];
 
   if (attrs['data-testid']) {
-    return { primary: `data-testid=${attrs['data-testid']}`, fallbacks };
+    return { primary: `data-testid=${attrs['data-testid']}`, fallbacks, confidence: 'high' };
   }
   if (attrs['data-test']) {
-    return { primary: `data-test=${attrs['data-test']}`, fallbacks };
+    return { primary: `data-test=${attrs['data-test']}`, fallbacks, confidence: 'high' };
   }
   if (attrs['data-qa']) {
-    return { primary: `data-qa=${attrs['data-qa']}`, fallbacks };
+    return { primary: `data-qa=${attrs['data-qa']}`, fallbacks, confidence: 'high' };
   }
 
   if (attrs.id && !/^\d/.test(attrs.id) && !/\d{5,}/.test(attrs.id)) {
-    return { primary: `id=${attrs.id}`, fallbacks };
+    return { primary: `id=${attrs.id}`, fallbacks, confidence: 'medium' };
   }
 
   if (attrs.name) fallbacks.push(`name=${attrs.name}`);
@@ -147,7 +148,167 @@ function buildLocator(el: Element, attrs: Record<string, string>): { primary: st
 
   fallbacks.push(`xpath=${buildXPath(el)}`);
 
-  return { primary: fallbacks[0] || tag, fallbacks: fallbacks.slice(1) };
+  const confidence: 'high' | 'medium' | 'low' =
+    fallbacks.length > 0 && !fallbacks[0].startsWith('xpath=') ? 'medium' : 'low';
+
+  return { primary: fallbacks[0] || tag, fallbacks: fallbacks.slice(1), confidence };
+}
+
+function detectSemanticContext(el: Element): { groupId?: string; semanticContext?: string } {
+  const form = el.closest('form');
+  if (form) {
+    // Prefer human-readable identifiers over machine ids
+    const formName = form.getAttribute('aria-label') || form.getAttribute('name') || form.id;
+    if (formName) {
+      const ctx = normalizeText(formName, 60);
+      return { groupId: `form-${ctx.replace(/\s+/g, '-').slice(0, 40)}`, semanticContext: ctx };
+    }
+    const legend = form.querySelector('legend, [role="heading"]');
+    if (legend) {
+      const text = normalizeText((legend as HTMLElement).innerText || legend.textContent || '');
+      if (text) return { groupId: `form-${text.replace(/\s+/g, '-').slice(0, 40)}`, semanticContext: text };
+    }
+    return { groupId: 'form-unnamed', semanticContext: 'Form' };
+  }
+
+  const fieldset = el.closest('fieldset');
+  if (fieldset) {
+    const legend = fieldset.querySelector('legend');
+    if (legend) {
+      const text = normalizeText((legend as HTMLElement).innerText || legend.textContent || '');
+      if (text) return { groupId: `fieldset-${text.replace(/\s+/g, '-').slice(0, 40)}`, semanticContext: text };
+    }
+    return { groupId: 'fieldset-unnamed', semanticContext: 'Fieldset' };
+  }
+
+  const dialog = el.closest('dialog, [role="dialog"], [role="alertdialog"]');
+  if (dialog) {
+    const title = dialog.getAttribute('aria-label') ||
+      (dialog.querySelector('h1,h2,h3') as HTMLElement)?.innerText;
+    if (title) {
+      const text = normalizeText(title, 60);
+      return { groupId: `dialog-${text.replace(/\s+/g, '-').slice(0, 40)}`, semanticContext: text };
+    }
+    return { groupId: 'dialog-unnamed', semanticContext: 'Dialog' };
+  }
+
+  return {};
+}
+
+function flattenForRelations(nodes: DistilledNode[]): DistilledNode[] {
+  const out: DistilledNode[] = [];
+  for (const n of nodes) {
+    out.push(n);
+    out.push(...flattenForRelations(n.children));
+  }
+  return out;
+}
+
+function rectDistance(a: { left: number; top: number; width: number; height: number }, b: { left: number; top: number; width: number; height: number }): number {
+  const acx = a.left + a.width / 2;
+  const acy = a.top + a.height / 2;
+  const bcx = b.left + b.width / 2;
+  const bcy = b.top + b.height / 2;
+  const dx = acx - bcx;
+  const dy = acy - bcy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+export function resolveRelations(ast: DistilledNode[]): void {
+  const flat = flattenForRelations(ast);
+  const byId = new Map<string, DistilledNode>();
+
+  for (const node of flat) {
+    if (node.attributes.id) byId.set(node.attributes.id, node);
+  }
+
+  for (const node of flat) {
+    const relations: NodeRelation[] = [];
+
+    // label-for
+    if (node.tag === 'label') {
+      const forId = node.attributes.for;
+      if (forId && byId.has(forId)) {
+        const target = byId.get(forId)!;
+        relations.push({
+          type: 'label-for',
+          targetLocator: target.locator,
+          targetText: target.text,
+          description: `Labels ${target.text || target.role}`,
+        });
+      }
+    }
+
+    // aria-controls
+    const controlsIds = node.attributes['aria-controls'];
+    if (controlsIds) {
+      for (const id of controlsIds.split(/\s+/)) {
+        if (byId.has(id)) {
+          const target = byId.get(id)!;
+          relations.push({
+            type: 'aria-controls',
+            targetLocator: target.locator,
+            targetText: target.text,
+            description: `Controls ${target.text || target.role}`,
+          });
+        }
+      }
+    }
+
+    // aria-describedby
+    const describedByIds = node.attributes['aria-describedby'];
+    if (describedByIds) {
+      for (const id of describedByIds.split(/\s+/)) {
+        if (byId.has(id)) {
+          const target = byId.get(id)!;
+          relations.push({
+            type: 'aria-describedby',
+            targetLocator: target.locator,
+            targetText: target.text,
+            description: `Described by ${target.text || target.role}`,
+          });
+        }
+      }
+    }
+
+    // aria-labelledby
+    const labelledByIds = node.attributes['aria-labelledby'];
+    if (labelledByIds) {
+      for (const id of labelledByIds.split(/\s+/)) {
+        if (byId.has(id)) {
+          const target = byId.get(id)!;
+          relations.push({
+            type: 'aria-labelledby',
+            targetLocator: target.locator,
+            targetText: target.text,
+            description: `Labelled by ${target.text || target.role}`,
+          });
+        }
+      }
+    }
+
+    node.relations = relations;
+  }
+}
+
+export function computeSpatialProximity(ast: DistilledNode[]): void {
+  const flat = flattenForRelations(ast).filter((n) => n.interactable);
+
+  for (const node of flat) {
+    if (!node.groupId) continue;
+
+    const sameGroup = flat.filter((n) => n !== node && n.groupId === node.groupId);
+    sameGroup.sort((a, b) => rectDistance(node.rect, a.rect) - rectDistance(node.rect, b.rect));
+
+    for (const near of sameGroup.slice(0, 2)) {
+      node.relations.push({
+        type: 'spatial-near',
+        targetLocator: near.locator,
+        targetText: near.text,
+        description: `In same ${node.semanticContext || 'group'} as ${near.text || near.role}`,
+      });
+    }
+  }
 }
 
 export function extractNode(el: Element, opts: DistillOptions = {}): DistilledNode | null {
@@ -190,12 +351,15 @@ export function extractNode(el: Element, opts: DistillOptions = {}): DistilledNo
       el.getAttribute('contenteditable') === 'true' ||
       (el.getAttribute('role') || '') === 'textbox');
 
+  const semantic = detectSemanticContext(el);
+
   return {
     role,
     tag,
     text,
     locator: locatorInfo.primary,
     locatorFallback: locatorInfo.fallbacks,
+    locatorStrategy: locatorInfo,
     interactable: interactive,
     visible,
     editable,
@@ -204,5 +368,8 @@ export function extractNode(el: Element, opts: DistillOptions = {}): DistilledNo
     attributes: attrs,
     rect,
     children: [],
+    relations: [],
+    semanticContext: semantic.semanticContext,
+    groupId: semantic.groupId,
   };
 }

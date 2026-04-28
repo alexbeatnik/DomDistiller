@@ -100,6 +100,8 @@ function distill(options?: DistillOptions): DistilledNode[] {
   walk(document.body || document.documentElement);
 
   const flattened = flattenNodes(roots);
+  resolveRelations(flattened);
+  computeSpatialProximity(flattened);
   return pruneEmpty(flattened);
 }
 `;

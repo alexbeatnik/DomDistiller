@@ -14,6 +14,7 @@ export function isMeaninglessWrapper(node: DistilledNode): boolean {
   if (node.text && node.text.trim().length > 0) return false;
   if (node.locator && node.locator.length > 0 && !node.locator.startsWith('xpath=')) return false;
   if (node.role && node.role !== node.tag && node.role !== 'presentation' && node.role !== 'none') return false;
+  if (node.relations.length > 0) return false;
   return true;
 }
 
@@ -41,7 +42,8 @@ export function pruneEmpty(nodes: DistilledNode[]): DistilledNode[] {
       n.editable ||
       (n.text && n.text.trim().length > 0) ||
       n.children.length > 0 ||
-      Object.keys(n.attributes).length > 0
+      Object.keys(n.attributes).length > 0 ||
+      n.relations.length > 0
     );
   });
 }

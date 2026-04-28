@@ -30,6 +30,15 @@ function nodeToRow(node: DistilledNode, columns: string[]): string {
       case 'checked':
         val = node.checked ? 'true' : 'false';
         break;
+      case 'confidence':
+        val = node.locatorStrategy.confidence;
+        break;
+      case 'semanticContext':
+        val = node.semanticContext || '-';
+        break;
+      case 'relations':
+        val = node.relations.map((r) => r.type).join(', ') || '-';
+        break;
       default:
         val = node.attributes[col] || '-';
     }
