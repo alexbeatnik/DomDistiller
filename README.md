@@ -3,7 +3,7 @@
 > **A DOM compiler for LLM agents.** Stop letting Copilot, Claude, and your QA agents read the raw DOM. They shouldn't. They were never supposed to.
 
 [![npm version](https://badge.fury.io/js/dom-distiller.svg)](https://www.npmjs.com/package/dom-distiller)
-[![Tests](https://img.shields.io/badge/tests-1086%2F1086%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1106%2F1106%20passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)]()
 
 ---
@@ -499,7 +499,7 @@ Now Copilot knows: `"Click the Sign In button inside the Login Form — not the 
 npm install
 npx playwright install chromium    # one-time
 npm run build
-npm test                           # 22 suites, ~1086 traps, real headless Chromium
+npm test                           # 23 suites, ~1106 traps, real headless Chromium
 ```
 
 `src/injected.ts`, `dist/injected.js`, and `src/generated/script.ts` are **auto-generated**. Do not hand-edit.
