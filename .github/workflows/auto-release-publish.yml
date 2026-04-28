@@ -40,6 +40,10 @@ jobs:
         if: steps.check_tag.outputs.EXISTS == 'false'
         run: npm ci
 
+      - name: Install Playwright browsers
+        if: steps.check_tag.outputs.EXISTS == 'false'
+        run: npx playwright install chromium
+
       - name: Build
         if: steps.check_tag.outputs.EXISTS == 'false'
         run: npm run build
