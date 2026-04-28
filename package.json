@@ -1,6 +1,6 @@
 {
   "name": "dom-distiller",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "A DOM compiler for LLM agents. Stops AI from reading the entire DOM by extracting a clean, token-optimized AST of interactable controls.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
