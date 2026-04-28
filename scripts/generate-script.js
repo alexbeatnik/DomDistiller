@@ -16,9 +16,14 @@ const escaped = script
   .replace(/`/g, '\\`')
   .replace(/\${/g, '\\${');
 
+// The injected script defines `function domDistiller(options)` at top level
+// (which becomes `window.domDistiller`). It is meant to be loaded via
+// `page.addScriptTag({ content: distillScript })` and then invoked with
+// `page.evaluate((opts) => window.domDistiller(opts), opts)`. Do NOT append
+// a top-level `return` here — that would be a SyntaxError inside a <script>
+// element and prevent the function from being registered on `window`.
 const code = `// AUTO-GENERATED — do not edit manually
-export const distillScript = \`${escaped}
-return domDistiller();\`;
+export const distillScript = \`${escaped}\`;
 `;
 
 fs.mkdirSync(path.dirname(outputPath), { recursive: true });

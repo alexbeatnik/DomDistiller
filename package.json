@@ -16,7 +16,8 @@
     "build:node": "tsup src/index.ts --out-dir dist --format cjs,esm --platform node --dts --clean false",
     "dev": "tsup src/index.ts --out-dir dist --format cjs,esm --platform node --dts --watch",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/*.test.ts"
+    "test": "tsx --test test/*.test.ts",
+    "pretest": "npm run build"
   },
   "keywords": [
     "dom",
@@ -31,6 +32,8 @@
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "playwright": "^1.59.1",
+    "playwright-core": "^1.59.1",
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

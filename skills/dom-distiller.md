@@ -83,30 +83,44 @@ Write TypeScript code using Playwright. Prefer data-testid and id locators.
 
 ### Recipe: Find and click a button
 
+`controlToPlaywrightLocator` returns a code snippet (`"page.locator('[data-testid=\"submit-form\"]')"`). To use it programmatically, build the CSS selector from the node and call `page.locator(...)` directly:
+
 ```typescript
-import { distillPage, findControls, controlToPlaywrightLocator } from 'dom-distiller';
+import { distillPage, findControls } from 'dom-distiller';
 
 const ast = await distillPage(page);
-const buttons = findControls(ast, { text: 'submit', role: 'button' });
+const [btn] = findControls(ast, { text: 'submit', role: 'button' });
+if (!btn) throw new Error('Submit button not found');
 
-if (buttons.length === 0) throw new Error('Submit button not found');
-if (buttons.length > 1) console.warn('Multiple submit buttons, using first');
+function nodeToSelector(n: { locator: string; tag: string }): string {
+  const [key, ...rest] = n.locator.split('=');
+  const val = rest.join('=');
+  switch (key) {
+    case 'data-testid':
+    case 'data-test':
+    case 'data-qa':
+    case 'name':
+    case 'aria-label':
+    case 'placeholder':
+    case 'title':
+      return `[${key}="${val}"]`;
+    case 'id':       return `#${val}`;
+    case 'href':     return `${n.tag}[href="${val}"]`;
+    case 'xpath':    return `xpath=${val}`;
+    default:         return n.tag;
+  }
+}
 
-const locatorStr = controlToPlaywrightLocator(buttons[0]);
-// → page.locator('[data-testid="submit-form"]')
-
-await page.locator(buttons[0].locator.replace(/^data-testid=/, '[data-testid="') + '"]').click();
+await page.locator(nodeToSelector(btn)).click();
 ```
 
 ### Recipe: Fill a form field by label text
 
 ```typescript
 const ast = await distillPage(page);
-const emailField = findControls(ast, { text: 'email', tag: 'input' })[0];
-
-if (emailField?.locator.startsWith('id=')) {
-  const id = emailField.locator.slice(3);
-  await page.locator(`#${id}`).fill('user@example.com');
+const [emailField] = findControls(ast, { text: 'email', tag: 'input' });
+if (emailField) {
+  await page.locator(nodeToSelector(emailField)).fill('user@example.com');
 }
 ```
 
@@ -135,7 +149,7 @@ const ast = window.domDistiller(options);
 | Function | Purpose |
 |----------|---------|
 | `distillPage(page, opts?)` | Inject and run distiller, return AST |
-| `distill(page)` | Retrieve pre-computed `window.__domDistillerResult` |
+| `distillScript` | Raw injector script string for manual `addScriptTag` injection |
 | `getInteractable(ast)` | Filter only actionable controls |
 | `getEditable(ast)` | Filter only text inputs |
 | `findControls(ast, query)` | Fuzzy search by text/role/tag/locator |

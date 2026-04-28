@@ -34,7 +34,7 @@ src/
   injected.ts        # Auto-generated browser bundle (no Node APIs)
   generated/
     script.ts        # Minified JS string embedded at build time
-  index.ts           # Public API: distillPage(), distill(), all LLM helpers
+  index.ts           # Public API: distillPage(), distillScript, all LLM helpers
 ```
 
 ## Build Pipeline
@@ -62,7 +62,7 @@ npm run build
 ## Testing
 
 ```bash
-npm test          # runs all 21 test suites (~1150 traps)
+npm test          # runs all 21 test suites (~1070 traps)
 ```
 
 Tests are in `test/*.test.ts`. Each test:

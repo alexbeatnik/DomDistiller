@@ -3,7 +3,7 @@
 > A **DOM compiler for LLM agents**. Injects into a browser via Playwright and returns a clean, token-optimized AST of interactable controls — so Copilot (or any LLM) can generate precise automation code instead of guessing selectors.
 
 [![npm version](https://badge.fury.io/js/dom-distiller.svg)](https://www.npmjs.com/package/dom-distiller)
-[![Tests](https://img.shields.io/badge/tests-1150%2F1150%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1070%2F1070%20passing-brightgreen)]()
 
 ## The Problem
 
@@ -132,13 +132,20 @@ async function distillPage(
 
 ### `distillScript`
 
-Raw JavaScript string of the injector. Use when you need full control over injection:
+Raw JavaScript string of the injector. Defines `window.domDistiller(options)`. Use when you need full control over injection — `distillPage()` is a thin wrapper around exactly this:
 
 ```typescript
 import { distillScript } from 'dom-distiller';
+
 await page.addScriptTag({ content: distillScript });
-const ast = await page.evaluate(() => (window as any).domDistiller());
+const ast = await page.evaluate(
+  (opts) => (window as any).domDistiller(opts),
+  { maxTextLength: 200 }
+);
 ```
+
+> **Why a separate `addScriptTag` + `evaluate` instead of `page.evaluate(distillScript)`?**
+> Playwright can hang on string-form `evaluate` containing named function declarations. Loading via `<script>` tag and then calling the global is reliable and works the same in every Playwright version.
 
 ### `astToMarkdown(ast, options?)`
 
@@ -225,19 +232,31 @@ interface DistilledNode {
 ```
 src/
   types.ts           # Shared TypeScript interfaces
-  core/
+  core/              # ⚠️ Browser-only — no Node imports allowed in this folder
     visibility.ts    # Visibility heuristics (display:none, opacity, aria-hidden)
     extractor.ts     # Interactivity detection & attribute extraction
     flattener.ts     # Tree compression (remove empty wrapper divs)
-  llm/
+  llm/               # Node-side helpers, run on the AST
     markdown.ts      # AST → Markdown table
     query.ts         # Fuzzy search & filtering
     playwright.ts    # Playwright locator generation
-  injected.ts        # Auto-generated browser bundle (no Node APIs)
+  injected.ts        # Auto-generated browser bundle (do not edit — see scripts/)
   generated/
-    script.ts        # Minified JS string embedded at build time
+    script.ts        # Auto-generated string export of the compiled browser bundle
   index.ts           # Node.js API entry point
+scripts/
+  bundle-injected.js # Concatenates src/types.ts + src/core/*.ts into src/injected.ts
+  generate-script.js # Wraps dist/injected.js as a string in src/generated/script.ts
 ```
+
+### Build pipeline
+
+`npm run build` runs four steps:
+
+1. `bundle:injected` — concatenates `src/types.ts` + `src/core/*.ts` into `src/injected.ts`, wrapped in a single `function domDistiller(options)`.
+2. `compile:injected` — TypeScript-compiles `src/injected.ts` → `dist/injected.js` (browser target, no Node APIs).
+3. `generate:script` — embeds `dist/injected.js` as a `distillScript` string export at `src/generated/script.ts`.
+4. `build:node` — `tsup` bundles `src/index.ts` into `dist/index.js` / `dist/index.mjs` with `.d.ts` files.
 
 ### How it works
 
@@ -305,6 +324,17 @@ Write Playwright TypeScript code. Use locators from the table.
 - Shadow DOM recursively pierced in the same pass
 - Zero runtime dependencies in the browser
 - Typical execution time: **< 20 ms** for a 10,000-element page
+
+## Development
+
+```bash
+npm install
+npx playwright install chromium    # one-time browser download for tests
+npm run build
+npm test
+```
+
+`npm test` runs 21 suites (~1070 traps) against a real headless Chromium. The build pipeline regenerates `src/injected.ts`, `dist/injected.js`, and `src/generated/script.ts`; do not hand-edit any of those files.
 
 ## License
 
