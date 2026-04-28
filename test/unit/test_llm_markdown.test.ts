@@ -60,7 +60,7 @@ describe('astToMarkdown (unit)', () => {
   });
 
   it('renders v2 semanticContext column', () => {
-    const ast = [makeNode({ semanticContext: 'Login Form' })];
+    const ast = [makeNode({ semanticContext: { type: 'form', label: 'Login Form', intent: 'login' } })];
     const md = astToMarkdown(ast, { columns: ['role', 'semanticContext'] });
     assert.ok(md.includes('Login Form'));
   });

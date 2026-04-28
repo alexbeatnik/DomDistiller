@@ -47,7 +47,11 @@ for (const file of ['visibility.ts', 'extractor.ts', 'flattener.ts']) {
 }
 
 const mainLogic = `
-function distill(options?: DistillOptions): DistilledNode[] {
+let _cachedAST: DistilledNode[] | null = null;
+let _dirty = true;
+let _observer: MutationObserver | null = null;
+
+function _distill(options?: DistillOptions): DistilledNode[] {
   const opts: DistillOptions = {
     maxTextLength: 200,
     includeHidden: false,
@@ -102,7 +106,29 @@ function distill(options?: DistillOptions): DistilledNode[] {
   const flattened = flattenNodes(roots);
   resolveRelations(flattened);
   computeSpatialProximity(flattened);
+  enrichSemanticBlocks(flattened);
   return pruneEmpty(flattened);
+}
+
+function _ensureObserver() {
+  if (_observer) return;
+  _observer = new MutationObserver(() => {
+    _dirty = true;
+  });
+  _observer.observe(document.body || document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+  });
+}
+
+function distill(options?: DistillOptions): DistilledNode[] {
+  _ensureObserver();
+  if (_dirty || !_cachedAST) {
+    _cachedAST = _distill(options);
+    _dirty = false;
+  }
+  return _cachedAST;
 }
 `;
 

@@ -1,9 +1,9 @@
 import type { Page } from 'playwright-core';
 import { distillScript } from './generated/script';
-import type { DistilledNode, DistillOptions, LocatorStrategy, NodeRelation } from './types';
+import type { DistilledNode, DistillOptions, LocatorStrategy, NodeRelation, SemanticContext, SuggestedAction } from './types';
 
 export { distillScript };
-export type { DistilledNode, DistillOptions, LocatorStrategy, NodeRelation };
+export type { DistilledNode, DistillOptions, LocatorStrategy, NodeRelation, SemanticContext, SuggestedAction };
 
 // LLM helpers
 export { astToMarkdown } from './llm/markdown';
@@ -13,6 +13,7 @@ export {
   getEditable,
   findControls,
   findControl,
+  resolveIntent,
 } from './llm/query';
 export {
   controlToPlaywrightLocator,

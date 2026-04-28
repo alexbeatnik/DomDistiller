@@ -67,3 +67,25 @@ export function findControl(
 ): DistilledNode | undefined {
   return findControls(ast, query)[0];
 }
+
+/**
+ * Resolve an intent by semantic context. Returns all nodes belonging to
+ * semantic blocks whose intent or label matches the given intent name.
+ *
+ * Example:
+ *   resolveIntent(ast, 'login') → nodes inside the Login Form semantic block
+ */
+export function resolveIntent(
+  ast: DistilledNode[],
+  intentName: string
+): DistilledNode[] {
+  const needle = intentName.toLowerCase();
+  return flattenAST(ast).filter((n) => {
+    const ctx = n.semanticContext;
+    if (!ctx) return false;
+    return (
+      (ctx.intent && ctx.intent.toLowerCase() === needle) ||
+      ctx.label.toLowerCase().includes(needle)
+    );
+  });
+}

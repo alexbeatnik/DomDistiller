@@ -82,21 +82,21 @@ const TRAPS = [
     n: "1. Form without aria-label uses legend as semanticContext",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'g1-street');
-      return node !== undefined && node.semanticContext === 'Shipping Address';
+      return node !== undefined && node.semanticContext?.label === 'Shipping Address';
     },
   },
   {
     n: "2. Form with name attr uses name (not id) as semanticContext",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'g2-card');
-      return node !== undefined && node.semanticContext === 'billing';
+      return node !== undefined && node.semanticContext?.label === 'billing';
     },
   },
   {
     n: "3. Standalone button has no semanticContext",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'standalone-btn');
-      return node !== undefined && node.semanticContext === undefined;
+      return node !== undefined && node.semanticContext?.label === undefined;
     },
   },
   {
@@ -110,14 +110,14 @@ const TRAPS = [
     n: "5. Dialog with heading but no aria-label uses heading text",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'g9-ok');
-      return node !== undefined && node.semanticContext === 'Confirm Action';
+      return node !== undefined && node.semanticContext?.label === 'Confirm Action';
     },
   },
   {
     n: "6. Dialog without heading or aria-label uses fallback 'Dialog'",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'g10-close');
-      return node !== undefined && node.semanticContext === 'Dialog';
+      return node !== undefined && node.semanticContext?.label === 'Dialog';
     },
   },
   // ── Relations: aria-controls ──

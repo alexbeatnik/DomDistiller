@@ -20,6 +20,20 @@ export interface NodeRelation {
   description: string;
 }
 
+export interface SemanticContext {
+  type: 'form' | 'fieldset' | 'dialog' | 'generic';
+  intent?: string;
+  label: string;
+  fields?: string[];
+  submitTarget?: string;
+}
+
+export interface SuggestedAction {
+  type: 'fill' | 'click' | 'select' | 'check' | 'uncheck';
+  targetAlias: string;
+  value?: string;
+}
+
 export interface DistilledNode {
   role: string;
   tag: string;
@@ -36,8 +50,10 @@ export interface DistilledNode {
   rect: Rect;
   children: DistilledNode[];
   relations: NodeRelation[];
-  semanticContext?: string;
+  alias?: string;
+  semanticContext?: SemanticContext;
   groupId?: string;
+  suggestedActions?: SuggestedAction[];
 }
 
 export interface DistillOptions {

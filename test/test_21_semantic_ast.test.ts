@@ -70,7 +70,7 @@ const TRAPS = [
     n: "1. Email input inside form gets semanticContext 'Login Form'",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'email');
-      return node !== undefined && node.semanticContext === 'Login Form';
+      return node !== undefined && node.semanticContext?.label === 'Login Form';
     },
   },
   {
@@ -84,14 +84,14 @@ const TRAPS = [
     n: "3. Fieldset checkbox gets semanticContext from legend",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'notify-email');
-      return node !== undefined && node.semanticContext === 'Notification Preferences';
+      return node !== undefined && node.semanticContext?.label === 'Notification Preferences';
     },
   },
   {
     n: "4. Dialog button gets semanticContext from aria-label",
     assert: (ast: DistilledNode[]) => {
       const node = findNodeById(ast, 'confirm-del');
-      return node !== undefined && node.semanticContext === 'Delete Account';
+      return node !== undefined && node.semanticContext?.label === 'Delete Account';
     },
   },
   // ── Relations: label-for ──

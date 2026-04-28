@@ -34,10 +34,19 @@ function nodeToRow(node: DistilledNode, columns: string[]): string {
         val = node.locatorStrategy.confidence;
         break;
       case 'semanticContext':
-        val = node.semanticContext || '-';
+        val = node.semanticContext?.label || '-';
         break;
       case 'relations':
         val = node.relations.map((r) => r.type).join(', ') || '-';
+        break;
+      case 'alias':
+        val = node.alias || '-';
+        break;
+      case 'intent':
+        val = node.semanticContext?.intent || '-';
+        break;
+      case 'suggestedActions':
+        val = node.suggestedActions?.map((a) => `${a.type}(${a.targetAlias})`).join(', ') || '-';
         break;
       default:
         val = node.attributes[col] || '-';

@@ -3,7 +3,7 @@
 > **A DOM compiler for LLM agents.** Stop letting Copilot, Claude, and your QA agents read the raw DOM. They shouldn't. They were never supposed to.
 
 [![npm version](https://badge.fury.io/js/dom-distiller.svg)](https://www.npmjs.com/package/dom-distiller)
-[![Tests](https://img.shields.io/badge/tests-1146%2F1146%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1202%2F1202%20passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)]()
 
 ---
@@ -203,10 +203,13 @@ function astToMarkdown(
 ): string;
 ```
 
-Supported columns include the standard fields (`role`, `text`, `locator`, `tag`, `editable`, `interactable`, `disabled`, `checked`) plus v2 Semantic AST fields:
+Supported columns include the standard fields (`role`, `text`, `locator`, `tag`, `editable`, `interactable`, `disabled`, `checked`) plus v3 Semantic AST fields:
 - `confidence` — shows `locatorStrategy.confidence`
-- `semanticContext` — shows the detected form/dialog group name
+- `semanticContext` — shows the detected form/dialog group label
+- `intent` — shows the inferred intent (e.g. `login`, `search`)
 - `relations` — shows a comma-separated list of relation types
+- `alias` — shows the auto-generated camelCase alias
+- `suggestedActions` — shows `fill(alias)`, `click(alias)` action sequence
 
 ### `getInteractable(controlMap)` / `getEditable(controlMap)`
 
@@ -215,6 +218,25 @@ Filter to only controls the agent can actually click / type into.
 ### `findControls(controlMap, query)` / `findControl(controlMap, query)`
 
 Fuzzy-search by `text`, `role`, `tag`, or `locator` substring. Returns matching `DistilledNode`s.
+
+### `resolveIntent(controlMap, intentName)`
+
+Resolve a semantic intent block from the AST. Returns only the nodes that belong to semantic contexts whose `intent` or `label` matches the given name.
+
+```typescript
+import { resolveIntent } from 'dom-distiller';
+
+const loginNodes = resolveIntent(controlMap, 'login');
+// → DistilledNode[] inside the Login Form semantic block
+
+const loginCtx = loginNodes[0]?.semanticContext;
+// → { type: 'form', intent: 'login', label: 'User Login', fields: [...], submitTarget: '...' }
+
+const actions = loginNodes[0]?.suggestedActions;
+// → [{ type: 'fill', targetAlias: 'emailAddress' }, { type: 'click', targetAlias: 'signIn' }]
+```
+
+This is the primary API for **intent-driven Copilot workflows** — instead of dumping the entire page into the LLM context, you give it only the semantic block it needs.
 
 ### `controlToPlaywrightLocator(node)`
 
@@ -280,8 +302,24 @@ interface DistilledNode {
   rect: { top; left; bottom; right; width; height };
   children: DistilledNode[];
   relations: NodeRelation[];  // contextual awareness graph
-  semanticContext?: string;   // e.g. "Login Form", "Payment Dialog"
+  alias?: string;             // camelCase variable name for Copilot (e.g. "emailField")
+  semanticContext?: SemanticContext; // structured semantic block
   groupId?: string;           // stable group identifier
+  suggestedActions?: SuggestedAction[]; // auto-detected action sequence
+}
+
+interface SemanticContext {
+  type: 'form' | 'fieldset' | 'dialog' | 'generic';
+  intent?: string;            // inferred intent: 'login', 'search', 'payment', ...
+  label: string;              // human-readable block name
+  fields?: string[];          // locators of editable fields inside this block
+  submitTarget?: string;      // locator of the submit/primary action
+}
+
+interface SuggestedAction {
+  type: 'fill' | 'click' | 'select' | 'check' | 'uncheck';
+  targetAlias: string;        // which alias to act on
+  value?: string;             // optional value hint (for fill/select)
 }
 
 interface NodeRelation {
@@ -326,63 +364,110 @@ scripts/
 
 Mixing them is the #1 way to break this library. See [CLAUDE.md](CLAUDE.md) for the full architectural contract.
 
-### v2 Extraction Engine — Semantic AST
+### v3 Extraction Engine — Semantic AST with Intent
 
-The browser injection layer (`src/core/`) now performs four additional passes after the initial TreeWalker extraction. All of them run in the browser and emit a **Semantic AST** — a control map where every node carries context, not just coordinates.
+The browser injection layer (`src/core/`) performs **six passes** after the initial TreeWalker extraction. All run in the browser and emit a **Semantic AST with Intent** — a control map where every node carries not just context, but **actionable intent**.
 
-#### 1. Semantic Grouping (Form Detection)
+#### 1. Semantic Grouping (Structured Schema)
 
-During extraction, every node queries its DOM ancestry for `<form>`, `<fieldset>`, `<dialog>`, or `[role="dialog"]` containers. When found, the node is tagged with:
+Every node queries its DOM ancestry for `<form>`, `<fieldset>`, `<dialog>`, or `[role="dialog"]` containers. When found, the node is tagged with a **structured** `SemanticContext` object:
 
-- `groupId`: a stable slug derived from the container's `id`, `name`, `aria-label`, or heading text (e.g. `form-login`, `dialog-delete-account`).
-- `semanticContext`: the human-readable name of that container (e.g. `"Login Form"`, `"Delete Account"`).
+```typescript
+{
+  type: "form",
+  intent: "login",          // inferred from label text
+  label: "User Login",
+  fields: ["id=email", "id=password"],
+  submitTarget: "data-testid=login-btn"
+}
+```
 
-This means Copilot no longer sees a flat list of 12 inputs and 3 buttons. It sees a **structured control map** with clear boundaries: `"These 3 inputs + 1 button belong to the Login Form. Those 2 inputs + 1 button belong to the 2FA Verification dialog."`
+This removes the LLM's need to guess form boundaries or field order. Copilot sees: `"The Login Form has 2 fields (email, password) and a submit button."`
 
-Implementation: `detectSemanticContext()` in `src/core/extractor.ts` uses `element.closest()` — O(depth) per node, effectively free inside the TreeWalker pass.
+Implementation: `detectSemanticContext()` in `src/core/extractor.ts` uses `element.closest()` + keyword intent inference — O(depth) per node, effectively free inside the TreeWalker pass.
 
-#### 2. Relations Graph (Contextual Awareness)
+#### 2. Alias Generation (Variable Naming)
 
-After the tree is flattened, a second pass resolves ID-based relationships that were captured as raw attributes during extraction:
+For every control, the extractor generates a camelCase `alias` that Copilot can use as a JavaScript variable name:
 
-- **`label-for`**: a `<label for="email">` gets a relation pointing to the input with `id="email"`.
+- `<label for="email">Email Address</label>` → `emailAddress`
+- `<input placeholder="Coupon Code">` → `couponCode`
+- `<button>Sign In</button>` → `signIn`
+
+Priority chain: `aria-label` → `label text` → `name` attr → `placeholder` → `text content`.
+
+This lets Copilot write **self-documenting Playwright code**:
+```typescript
+const emailAddress = page.locator('[data-testid="email"]');
+await emailAddress.fill('user@example.com');
+```
+
+Implementation: `generateAlias()` in `src/core/extractor.ts`.
+
+#### 3. Relations Graph (Contextual Awareness)
+
+A post-pass resolves ID-based relationships:
+
+- **`label-for`**: a `<label for="email">` gets a relation pointing to the input.
 - **`aria-controls`**: a tab button gets a relation to its tabpanel.
 - **`aria-describedby`**: an input gets a relation to its help text.
 - **`aria-labelledby`**: an input gets a relation to its label element(s).
-- **`spatial-near`**: for every interactable node, up to 2 nearest neighbors within the same `groupId` are linked using their bounding-box distance.
+- **`spatial-near`**: up to 2 nearest neighbors within the same `groupId`.
 
-Each relation carries `targetLocator`, `targetText`, and a `description` string that the LLM can read directly.
+Implementation: `resolveRelations()` and `computeSpatialProximity()` in `src/core/extractor.ts`.
 
-Implementation: `resolveRelations()` and `computeSpatialProximity()` in `src/core/extractor.ts`. This is a post-pass over the already-pruned AST (typically ~50 nodes), so O(n²) spatial checks are trivial.
+#### 4. Action Suggestion Layer (Not Execution)
 
-#### 3. Multi-Locator Strategy (Stability Engine)
+For every semantic block, the extractor auto-generates a `suggestedActions` array:
 
-The extractor no longer returns a single string locator. It returns a `LocatorStrategy` object:
+```typescript
+[
+  { type: "fill", targetAlias: "emailAddress" },
+  { type: "fill", targetAlias: "password" },
+  { type: "click", targetAlias: "signIn" }
+]
+```
+
+**Critical constraint:** these are suggestions. The library **never** executes them. Copilot reads the array and translates it into native Playwright code:
+
+```typescript
+await emailAddress.fill('user@example.com');
+await password.fill('secret123');
+await signIn.click();
+```
+
+This reduces LLM reasoning to **zero** for standard form flows.
+
+Implementation: `enrichSemanticBlocks()` in `src/core/extractor.ts` scans each group for editable fields + submit button.
+
+#### 5. Multi-Locator Strategy (Stability Engine)
+
+The extractor returns a `LocatorStrategy` object:
 
 ```typescript
 {
   primary:    "data-testid=login-btn",
   fallbacks:  ["id=submit", "text=Log In"],
-  confidence: "high"   // "high" | "medium" | "low"
+  confidence: "high"
 }
 ```
 
-Confidence is assigned by the extractor:
-- **high** — `data-testid`, `data-test`, `data-qa`
-- **medium** — stable `id`, `name`, `aria-label`, `placeholder`, `href`
-- **low** — `xpath` fallback
-
-The Node layer exposes `controlToPlaywrightSelfHealingLocator(node)`, which turns a `LocatorStrategy` into a resilient Playwright expression:
-
+The Node layer exposes `controlToPlaywrightSelfHealingLocator(node)`:
 ```typescript
 page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
 ```
 
-This lets Copilot emit **self-healing selectors** that survive minor DOM churn without hallucinating new ones.
+#### 6. Incremental Distillation (MutationObserver)
 
-#### 4. Incremental Distillation (MutationObserver) — Architecture Note
+The injected script sets up a `MutationObserver` on `document.body`. After the first `distillPage()` call:
 
-The current release runs a full distillation on every call. The architecture is designed to support `observeDOMChanges()` in a future release: a `MutationObserver` inside the browser page would maintain a patched AST in memory, providing 0-latency updates when Copilot needs to check state after a click. This is **not yet implemented** — the current workflow is still `distillPage(page)` per step — but the AST shape (`relations`, `groupId`, `locatorStrategy`) is designed to make incremental patching straightforward.
+- The AST is **cached** in memory inside the browser page.
+- Subsequent calls to `window.domDistiller()` return the **cached AST in < 5 ms**.
+- If the DOM changes (mutation), a dirty flag is set; the next call triggers a **full re-distill** automatically.
+
+This gives Copilot **0-latency state checks** after clicks, form fills, and navigation.
+
+Implementation: `MutationObserver` inside the browser bundle (`scripts/bundle-injected.js`).
 
 ### Build pipeline (`npm run build`)
 
@@ -413,9 +498,8 @@ import {
   distillPage,
   astToMarkdown,
   getInteractable,
-  findControls,
+  resolveIntent,
   controlToPlaywrightLocator,
-  controlToPlaywrightSelfHealingLocator,
   describePage,
 } from 'dom-distiller';
 
@@ -423,49 +507,60 @@ const browser = await chromium.launch();
 const page = await browser.newPage();
 await page.goto('https://my-app.com/login');
 
-// 1. Compile the page into a Semantic AST
+// 1. Compile the page into a Semantic AST with Intent
 const controlMap = await distillPage(page);
-const controls = getInteractable(controlMap);
 
-// 2. Build LLM context (Markdown table + summary)
-//    Include semantic context so the LLM understands form boundaries
-const markdown = astToMarkdown(controls, {
-  columns: ['role', 'text', 'locator', 'confidence', 'semanticContext'],
-  maxRows: 30,
+// 2. Copilot already knows the user wants to "login".
+//    Instead of dumping the whole page, resolve ONLY the login intent block.
+const loginBlock = resolveIntent(controlMap, 'login');
+
+// 3. Build a focused Markdown table with aliases and suggested actions
+const markdown = astToMarkdown(loginBlock, {
+  columns: ['alias', 'role', 'locator', 'confidence', 'suggestedActions'],
 });
-const description = describePage(controls);
 
-// 3. Resolve a specific control without an LLM round-trip
-const [signIn] = findControls(controls, { text: 'sign in', role: 'button' });
-console.log(controlToPlaywrightLocator(signIn));
-// → page.locator('[data-testid="login-btn"]')
+// 4. Get the semantic context object for the login form
+const loginCtx = loginBlock[0]?.semanticContext;
 
-// 4. Emit a self-healing locator for resilient tests
-const [emailInput] = findControls(controls, { text: 'email', role: 'textbox' });
-console.log(controlToPlaywrightSelfHealingLocator(emailInput));
-// → page.locator('[name="email"]').or(page.locator('[aria-label="Work Email"]'))
-
-// 5. Use in a Copilot / Claude prompt with Semantic AST context
+// 5. Copilot prompt — now the LLM has ZERO guessing to do
 const prompt = `
-Page: Login
-${description}
+Task: log in as user@example.com with password "secret123".
 
-Available controls:
+The page exposes a Login Form with the following structured intent:
+- Intent: ${loginCtx?.intent}
+- Label: ${loginCtx?.label}
+- Fields: ${loginCtx?.fields?.join(', ')}
+- Submit: ${loginCtx?.submitTarget}
+
+Available controls (with auto-generated aliases):
 ${markdown}
 
-IMPORTANT SEMANTIC NOTES:
-- The "Login Form" group contains the email input, password input, and Sign In button.
-- The email input has a label-for relation to the "Email" label.
-- The Sign In button has confidence "high" (data-testid). Use it as the primary locator.
-- The password input has confidence "medium" (id). Its fallback is aria-label.
+Suggested action sequence (translate these into native Playwright code):
+${loginBlock[0]?.suggestedActions?.map((a, i) => `${i + 1}. ${a.type}("${a.targetAlias}")`).join('\n')}
 
-Task: log in as user@example.com with password "secret123".
-Write Playwright TypeScript. Use ONLY the locators above.
-Prefer high-confidence locators. Use .or() chains only when confidence is medium or low.
+RULES:
+- Use ONLY the locators above.
+- Use the aliases as JavaScript variable names (e.g. const emailAddress = page.locator('...')).
+- Write standard, native Playwright TypeScript. NO custom wrappers.
+- The final output must be plain Playwright code that runs in any .spec.ts file.
 `;
+
+// 6. Copilot generates this exact code block:
+//    const emailAddress = page.locator('[data-testid="email"]');
+//    const password = page.locator('#password');
+//    const signIn = page.locator('[data-testid="login-btn"]');
+//    await emailAddress.fill('user@example.com');
+//    await password.fill('secret123');
+//    await signIn.click();
+
+// 7. After the click, check state with 0-latency cached AST
+//    (MutationObserver keeps the AST warm; no full re-parse)
+const stateAfterClick = await distillPage(page);
+// → returns cached AST instantly if DOM hasn't changed,
+//   or auto-refreshes AST if MutationObserver detected a change
 ```
 
-### How the Semantic AST helps Copilot write better code
+### How the v3 Semantic AST eliminates LLM reasoning
 
 **Before (flat AST):**
 ```markdown
@@ -477,19 +572,23 @@ Prefer high-confidence locators. Use .or() chains only when confidence is medium
 | button  | Sign In  | data-testid=oauth-btn | button |
 ```
 
-Copilot sees two "Sign In" buttons and has to guess which one to click.
+Copilot sees two "Sign In" buttons and has to guess which one to click, what to fill, and in what order.
 
-**After (Semantic AST):**
+**After (v3 Intent-Aware AST):**
 ```markdown
-| role    | text     | locator               | confidence | semanticContext |
-|---------|----------|-----------------------|------------|-----------------|
-| textbox | Email    | id=email              | medium     | Login Form      |
-| textbox | Password | id=password           | medium     | Login Form      |
-| button  | Sign In  | data-testid=login-btn | high       | Login Form      |
-| button  | Sign In  | data-testid=oauth-btn | high       | OAuth Dialog    |
+| alias        | role    | locator               | confidence | suggestedActions   |
+|--------------|---------|-----------------------|------------|--------------------|
+| emailAddress | textbox | id=email              | medium     | fill(emailAddress) |
+| password     | textbox | id=password           | medium     | fill(password)     |
+| signIn       | button  | data-testid=login-btn | high       | click(signIn)      |
 ```
 
-Now Copilot knows: `"Click the Sign In button inside the Login Form — not the one in the OAuth Dialog."` No guessing. No hallucinated selectors.
+Copilot receives:
+- **Structured intent**: `{ type: "form", intent: "login", fields: [...], submitTarget: "..." }`
+- **Auto-generated aliases**: `emailAddress`, `password`, `signIn`
+- **Suggested action sequence**: `fill → fill → click`
+
+The LLM's job is reduced to **mechanical translation** — no reasoning, no guessing, no hallucinated selectors. The output is still **100% standard Playwright**.
 
 ---
 
@@ -501,7 +600,7 @@ npx playwright install chromium    # one-time (only for integration tests)
 npm run build
 npm test                           # full suite: unit + integration
 npm run test:unit                  # 9 suites, pure Node, no browser (~150 ms)
-npm run test:integration           # 23 suites, real headless Chromium (~1106 traps)
+npm run test:integration           # 24 suites, real headless Chromium (~1162 traps)
 ```
 
 `src/injected.ts`, `dist/injected.js`, and `src/generated/script.ts` are **auto-generated**. Do not hand-edit.

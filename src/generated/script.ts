@@ -182,42 +182,123 @@ function domDistiller(options) {
         const confidence = fallbacks.length > 0 && !fallbacks[0].startsWith('xpath=') ? 'medium' : 'low';
         return { primary: fallbacks[0] || tag, fallbacks: fallbacks.slice(1), confidence };
     }
+    function toCamelCaseAlias(text) {
+        const cleaned = text
+            .replace(/[^a-zA-Z0-9\\s]/g, '')
+            .trim()
+            .toLowerCase();
+        if (!cleaned)
+            return undefined;
+        const words = cleaned.split(/\\s+/).filter((w) => w.length > 0);
+        if (words.length === 0)
+            return undefined;
+        const first = words[0];
+        const rest = words.slice(1).map((w) => w[0].toUpperCase() + w.slice(1));
+        const alias = first + rest.join('');
+        // Ensure valid JS identifier
+        if (/^\\d/.test(alias))
+            return 'el' + alias[0].toUpperCase() + alias.slice(1);
+        return alias;
+    }
+    function generateAlias(el, text, attrs) {
+        // Priority: aria-label > label text > name > placeholder > text content
+        const ariaLabel = el.getAttribute('aria-label');
+        if (ariaLabel) {
+            const alias = toCamelCaseAlias(ariaLabel);
+            if (alias)
+                return alias;
+        }
+        const labelText = getLabelText(el);
+        if (labelText) {
+            const alias = toCamelCaseAlias(labelText);
+            if (alias)
+                return alias;
+        }
+        if (attrs.name) {
+            const alias = toCamelCaseAlias(attrs.name);
+            if (alias)
+                return alias;
+        }
+        const placeholder = el.getAttribute('placeholder');
+        if (placeholder) {
+            const alias = toCamelCaseAlias(placeholder);
+            if (alias)
+                return alias;
+        }
+        if (text && text.length > 0 && text.length < 40) {
+            const alias = toCamelCaseAlias(text);
+            if (alias)
+                return alias;
+        }
+        return undefined;
+    }
+    function inferIntent(label) {
+        const lower = label.toLowerCase();
+        const intentMap = {
+            login: ['login', 'sign in', 'log in', 'authenticate'],
+            register: ['register', 'sign up', 'create account', 'join'],
+            search: ['search', 'find', 'query'],
+            payment: ['payment', 'checkout', 'billing', 'pay'],
+            contact: ['contact', 'message', 'feedback'],
+            subscribe: ['subscribe', 'newsletter'],
+            filter: ['filter', 'sort'],
+            delete: ['delete', 'remove', 'destroy'],
+        };
+        for (const [intent, keywords] of Object.entries(intentMap)) {
+            if (keywords.some((k) => lower.includes(k)))
+                return intent;
+        }
+        return undefined;
+    }
     function detectSemanticContext(el) {
         const form = el.closest('form');
         if (form) {
-            // Prefer human-readable identifiers over machine ids
             const formName = form.getAttribute('aria-label') || form.getAttribute('name') || form.id;
-            if (formName) {
-                const ctx = normalizeText(formName, 60);
-                return { groupId: \`form-\${ctx.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: ctx };
+            let label = formName ? normalizeText(formName, 60) : '';
+            if (!label) {
+                const legend = form.querySelector('legend, [role="heading"]');
+                if (legend)
+                    label = normalizeText(legend.innerText || legend.textContent || '');
             }
-            const legend = form.querySelector('legend, [role="heading"]');
-            if (legend) {
-                const text = normalizeText(legend.innerText || legend.textContent || '');
-                if (text)
-                    return { groupId: \`form-\${text.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: text };
-            }
-            return { groupId: 'form-unnamed', semanticContext: 'Form' };
+            if (!label)
+                label = 'Form';
+            const ctx = {
+                type: 'form',
+                label,
+                intent: inferIntent(label),
+            };
+            return { groupId: \`form-\${label.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: ctx };
         }
         const fieldset = el.closest('fieldset');
         if (fieldset) {
             const legend = fieldset.querySelector('legend');
-            if (legend) {
-                const text = normalizeText(legend.innerText || legend.textContent || '');
-                if (text)
-                    return { groupId: \`fieldset-\${text.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: text };
-            }
-            return { groupId: 'fieldset-unnamed', semanticContext: 'Fieldset' };
+            let label = '';
+            if (legend)
+                label = normalizeText(legend.innerText || legend.textContent || '');
+            if (!label)
+                label = 'Fieldset';
+            const ctx = {
+                type: 'fieldset',
+                label,
+                intent: inferIntent(label),
+            };
+            return { groupId: \`fieldset-\${label.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: ctx };
         }
         const dialog = el.closest('dialog, [role="dialog"], [role="alertdialog"]');
         if (dialog) {
             const title = dialog.getAttribute('aria-label') ||
                 dialog.querySelector('h1,h2,h3')?.innerText;
-            if (title) {
-                const text = normalizeText(title, 60);
-                return { groupId: \`dialog-\${text.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: text };
-            }
-            return { groupId: 'dialog-unnamed', semanticContext: 'Dialog' };
+            let label = '';
+            if (title)
+                label = normalizeText(title, 60);
+            if (!label)
+                label = 'Dialog';
+            const ctx = {
+                type: 'dialog',
+                label,
+                intent: inferIntent(label),
+            };
+            return { groupId: \`dialog-\${label.replace(/\\s+/g, '-').slice(0, 40)}\`, semanticContext: ctx };
         }
         return {};
     }
@@ -320,8 +401,67 @@ function domDistiller(options) {
                     type: 'spatial-near',
                     targetLocator: near.locator,
                     targetText: near.text,
-                    description: \`In same \${node.semanticContext || 'group'} as \${near.text || near.role}\`,
+                    description: \`In same \${node.semanticContext?.label || 'group'} as \${near.text || near.role}\`,
                 });
+            }
+        }
+    }
+    function enrichSemanticBlocks(ast) {
+        const flat = flattenForRelations(ast);
+        // Group nodes by groupId
+        const groups = new Map();
+        for (const node of flat) {
+            if (node.groupId) {
+                const list = groups.get(node.groupId) || [];
+                list.push(node);
+                groups.set(node.groupId, list);
+            }
+        }
+        for (const [groupId, nodes] of groups) {
+            // Find the "root" semantic context node (first node in group with semanticContext)
+            const root = nodes.find((n) => n.semanticContext);
+            if (!root || !root.semanticContext)
+                continue;
+            // Collect field locators (editable inputs in the group)
+            const fields = nodes
+                .filter((n) => n.editable)
+                .map((n) => n.locator);
+            // Find submit target (button with type=submit, or last button in form)
+            const submitBtn = nodes.find((n) => n.tag === 'button' && n.attributes.type === 'submit') ||
+                nodes.find((n) => n.tag === 'button' && n.attributes.type !== 'button') ||
+                nodes.filter((n) => n.tag === 'button' || n.tag === 'input').pop();
+            // Build enriched semantic context
+            const enrichedCtx = {
+                ...root.semanticContext,
+                fields,
+                submitTarget: submitBtn ? submitBtn.locator : undefined,
+            };
+            // Generate suggested actions for this semantic block
+            const actions = [];
+            for (const node of nodes) {
+                if (node.editable && node.alias) {
+                    const inputType = node.attributes.type?.toLowerCase() || 'text';
+                    if (inputType === 'checkbox') {
+                        actions.push({ type: 'check', targetAlias: node.alias });
+                    }
+                    else if (inputType === 'select-one' || node.tag === 'select') {
+                        actions.push({ type: 'select', targetAlias: node.alias });
+                    }
+                    else {
+                        actions.push({ type: 'fill', targetAlias: node.alias });
+                    }
+                }
+            }
+            if (submitBtn && submitBtn.alias) {
+                actions.push({ type: 'click', targetAlias: submitBtn.alias });
+            }
+            // Copy enriched context and suggested actions to ALL nodes in the group
+            // so any node can answer "what block am I in and what are its actions?"
+            for (const node of nodes) {
+                node.semanticContext = enrichedCtx;
+                if (actions.length > 0) {
+                    node.suggestedActions = actions;
+                }
             }
         }
     }
@@ -353,6 +493,7 @@ function domDistiller(options) {
                 el.getAttribute('contenteditable') === 'true' ||
                 (el.getAttribute('role') || '') === 'textbox');
         const semantic = detectSemanticContext(el);
+        const alias = generateAlias(el, text, attrs);
         return {
             role,
             tag,
@@ -369,6 +510,7 @@ function domDistiller(options) {
             rect,
             children: [],
             relations: [],
+            alias,
             semanticContext: semantic.semanticContext,
             groupId: semantic.groupId,
         };
@@ -424,7 +566,10 @@ function domDistiller(options) {
                 n.relations.length > 0);
         });
     }
-    function distill(options) {
+    let _cachedAST = null;
+    let _dirty = true;
+    let _observer = null;
+    function _distill(options) {
         const opts = {
             maxTextLength: 200,
             includeHidden: false,
@@ -468,7 +613,28 @@ function domDistiller(options) {
         const flattened = flattenNodes(roots);
         resolveRelations(flattened);
         computeSpatialProximity(flattened);
+        enrichSemanticBlocks(flattened);
         return pruneEmpty(flattened);
+    }
+    function _ensureObserver() {
+        if (_observer)
+            return;
+        _observer = new MutationObserver(() => {
+            _dirty = true;
+        });
+        _observer.observe(document.body || document.documentElement, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+        });
+    }
+    function distill(options) {
+        _ensureObserver();
+        if (_dirty || !_cachedAST) {
+            _cachedAST = _distill(options);
+            _dirty = false;
+        }
+        return _cachedAST;
     }
     return distill(options);
 }
