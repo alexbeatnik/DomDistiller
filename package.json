@@ -1,0 +1,52 @@
+{
+  "name": "dom-distiller",
+  "version": "0.0.1",
+  "description": "A DOM compiler for LLM agents. Stops AI from reading the entire DOM by extracting a clean, token-optimized AST of interactable controls.",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "npm run bundle:injected && npm run compile:injected && npm run generate:script && npm run build:node",
+    "bundle:injected": "node scripts/bundle-injected.js",
+    "compile:injected": "tsc -p tsconfig.inject.json",
+    "generate:script": "node scripts/generate-script.js",
+    "build:node": "tsup src/index.ts --out-dir dist --format cjs,esm --platform node --dts --clean false",
+    "dev": "tsup src/index.ts --out-dir dist --format cjs,esm --platform node --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "tsx --test test/unit/*.test.ts",
+    "test:integration": "npm run build && tsx --test test/*.test.ts",
+    "pretest": "npm run build"
+  },
+  "keywords": [
+    "llm",
+    "agent",
+    "copilot",
+    "ast",
+    "playwright",
+    "automation",
+    "dom",
+    "dom-compiler",
+    "testing",
+    "sdet"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "playwright": "^1.59.1",
+    "playwright-core": "^1.59.1",
+    "tsup": "^8.5.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "playwright-core": ">=1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
